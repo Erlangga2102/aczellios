@@ -1,11 +1,21 @@
 const { Client, GatewayIntentBits, Partials } = require('discord.js');
+const http = require('http');
 
-// Konfigurasi Bot & API
-const TOKEN = "MTU0MDMzOTUyNDQ4MjEwNTM4NA.Gd42Hd.WYsSxVaMD5FgPx5CHWABnZh5X_cxA-nz6MKwYg";
-const TARGET_CHANNEL_ID = "1540339804695306344";
-const API_BASE = "https://arnaru-ai.vercel.app";
+// Membaca konfigurasi dari Environment Variables Railway
+const TOKEN = process.env.DISCORD_TOKEN;
+const TARGET_CHANNEL_ID = process.env.TARGET_CHANNEL_ID;
+const API_BASE = process.env.API_BASE || "https://arnaru-ai.vercel.app";
 
-// Penyimpanan Conversation ID untuk menyimpan riwayat topik percakapan
+// Membuat dummy HTTP Server untuk Railway Healthcheck
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Aczellios AI Bot is active!');
+}).listen(PORT, () => {
+    console.log(`[!] HTTP Server berjalan di port ${PORT}`);
+});
+
+// Penyimpanan Conversation ID untuk riwayat topik percakapan
 const activeConversations = new Map();
 
 const client = new Client({
@@ -22,25 +32,19 @@ client.on('ready', () => {
 });
 
 client.on('messageCreate', async (message) => {
-    // Abaikan pesan dari bot lain
     if (message.author.bot) return;
-    
-    // Batasi respon hanya di channel spesifik
     if (message.channel.id !== TARGET_CHANNEL_ID) return;
 
     const text = message.content.trim();
     const attachments = message.attachments;
 
-    // Fitur Reset Memori / Topik Percakapan
     if (text.toLowerCase() === '/reset' || text.toLowerCase() === 'reset') {
         activeConversations.delete(message.channel.id);
         return message.reply("🧹 **Memori percakapan telah direset!** Aczellios AI siap memulai topik baru.");
     }
 
-    // Tampilkan indikator "Bot is typing..."
     await message.channel.sendTyping();
 
-    // Cek apakah user meminta pembuat gambar
     const isImageRequest = text.toLowerCase().startsWith('/imagine') || 
                            text.toLowerCase().startsWith('buatkan gambar') ||
                            text.toLowerCase().startsWith('gambar');
@@ -57,7 +61,6 @@ client.on('messageCreate', async (message) => {
     }
 });
 
-// Fungsi untuk Chat / Tanya Jawab / Baca File dengan Memori Topik
 async function handleChat(message, text, attachments) {
     const formData = new FormData();
     const question = text || "Tolong jelaskan gambar/file ini dengan detail.";
@@ -67,12 +70,10 @@ async function handleChat(message, text, attachments) {
     formData.append("model", "gpt-5");
     formData.append("systemPrompt", "Nama kamu adalah Aczellios AI. Kamu WAJIB menjawab seluruh pertanyaan menggunakan Bahasa Indonesia yang ramah, sopan, dan santai.");
 
-    // Kirim conversationId jika sudah ada sesi percakapan sebelumnya
     if (activeConversations.has(channelId)) {
         formData.append("conversationId", activeConversations.get(channelId));
     }
 
-    // Kirim file jika ada attachment (Maksimal 9 file)
     if (attachments.size > 0) {
         let count = 0;
         for (const [id, attachment] of attachments) {
@@ -91,7 +92,6 @@ async function handleChat(message, text, attachments) {
 
     if (!res.ok) throw new Error(`API Error Status: ${res.status}`);
 
-    // Baca dan parse format SSE (data: {"answer": "...", "conversationId": "..."})
     const streamData = await res.text();
     const lines = streamData.split('\n');
     let fullAnswer = "";
@@ -109,16 +109,12 @@ async function handleChat(message, text, attachments) {
             if (parsed.answer) {
                 fullAnswer += parsed.answer;
             }
-            // Simpan conversationId terbaru dari API
             if (parsed.conversationId) {
                 newConversationId = parsed.conversationId;
             }
-        } catch (e) {
-            // Abaikan potongan JSON yang tidak lengkap
-        }
+        } catch (e) { }
     }
 
-    // Update penyimpanan conversationId
     if (newConversationId) {
         activeConversations.set(channelId, newConversationId);
     }
@@ -127,7 +123,6 @@ async function handleChat(message, text, attachments) {
         fullAnswer = "Maaf, Aczellios AI tidak memberikan respon.";
     }
 
-    // Split pesan jika melebihi batas 2000 karakter Discord
     if (fullAnswer.length > 2000) {
         const chunks = fullAnswer.match(/[\s\S]{1,1999}/g) || [];
         for (const chunk of chunks) {
@@ -138,7 +133,6 @@ async function handleChat(message, text, attachments) {
     }
 }
 
-// Fungsi untuk Generate Gambar / Image to Image
 async function handleImageGeneration(message, text, attachments) {
     const formData = new FormData();
     const channelId = message.channel.id;
@@ -149,12 +143,10 @@ async function handleImageGeneration(message, text, attachments) {
     formData.append("prompt", prompt);
     formData.append("model", "flux-pro");
 
-    // Sertakan conversationId juga jika ada
     if (activeConversations.has(channelId)) {
         formData.append("conversationId", activeConversations.get(channelId));
     }
 
-    // Kirim file referensi jika ada (Image to Image, Maksimal 5 file)
     if (attachments.size > 0) {
         let count = 0;
         for (const [id, attachment] of attachments) {
