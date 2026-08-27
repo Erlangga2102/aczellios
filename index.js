@@ -16,9 +16,6 @@ http.createServer((req, res) => {
     console.log(`[!] HTTP Server berjalan di port ${PORT}`);
 });
 
-// Storage memori percakapan (conversationId per channel)
-const activeConversations = new Map();
-
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -28,7 +25,6 @@ const client = new Client({
     partials: [Partials.Message, Partials.Channel]
 });
 
-// Menggunakan clientReady untuk menghindari warning discord.js v15
 client.once('clientReady', () => {
     console.log(`[!] Berhasil login sebagai ${client.user.tag} (Aczellios AI)`);
 });
@@ -39,12 +35,6 @@ client.on('messageCreate', async (message) => {
 
     const text = message.content.trim();
     const attachments = message.attachments;
-
-    // Command reset ingatan topik
-    if (text.toLowerCase() === '/reset' || text.toLowerCase() === 'reset') {
-        activeConversations.delete(message.channel.id);
-        return message.reply("🧹 **Memori percakapan telah direset!** Aczellios AI siap memulai topik baru.");
-    }
 
     await message.channel.sendTyping();
 
@@ -60,26 +50,21 @@ client.on('messageCreate', async (message) => {
         }
     } catch (error) {
         console.error("Terjadi Error:", error);
-        message.reply("Maaf, terjadi kesalahan saat menghubungkan ke server Aczellios AI.");
+        message.reply(`Maaf, terjadi kesalahan sistem: ${error.message}`);
     }
 });
 
 async function handleChat(message, text, attachments) {
     const question = text || "Halo";
-    const channelId = message.channel.id;
     let res;
 
-    // Memilih format payload: FormData (jika ada file) atau JSON (jika teks biasa)
+    // Menggunakan model yang lebih stabil (gpt-4o atau gemini-2.5-flash)
     if (attachments.size > 0) {
         const formData = new FormData();
         formData.append("question", question);
-        formData.append("model", "gpt-5");
+        formData.append("model", "gpt-4o");
         formData.append("systemPrompt", "Nama kamu adalah Aczellios AI. Kamu WAJIB menjawab seluruh pertanyaan menggunakan Bahasa Indonesia yang ramah, sopan, dan santai.");
         
-        if (activeConversations.has(channelId)) {
-            formData.append("conversationId", activeConversations.get(channelId));
-        }
-
         let count = 0;
         for (const [id, attachment] of attachments) {
             if (count >= 9) break; 
@@ -96,13 +81,9 @@ async function handleChat(message, text, attachments) {
     } else {
         const jsonBody = {
             question: question,
-            model: "gpt-5",
+            model: "gpt-4o",
             systemPrompt: "Nama kamu adalah Aczellios AI. Kamu WAJIB menjawab seluruh pertanyaan menggunakan Bahasa Indonesia yang ramah, sopan, dan santai."
         };
-        
-        if (activeConversations.has(channelId)) {
-            jsonBody.conversationId = activeConversations.get(channelId);
-        }
 
         res = await fetch(`${API_BASE}/api/chat`, {
             method: 'POST',
@@ -111,8 +92,6 @@ async function handleChat(message, text, attachments) {
         });
     }
 
-    if (!res.ok) throw new Error(`API Error Status: ${res.status}`);
-
     const streamData = await res.text();
     console.log("---- RAW RESPONSE DARI API ----");
     console.log(streamData);
@@ -120,9 +99,7 @@ async function handleChat(message, text, attachments) {
 
     const lines = streamData.split('\n');
     let fullAnswer = "";
-    let newConversationId = null;
 
-    // Parse format SSE (Server-Sent Events)
     for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed.startsWith('data:')) continue;
@@ -135,24 +112,17 @@ async function handleChat(message, text, attachments) {
             if (parsed.answer) {
                 fullAnswer += parsed.answer;
             }
-            if (parsed.conversationId) {
-                newConversationId = parsed.conversationId;
-            }
         } catch (e) { }
     }
 
-    if (newConversationId) {
-        activeConversations.set(channelId, newConversationId);
-    }
-
+    // Jika gagal parse SSE, cek apakah API mengirimkan pesan error JSON biasa
     if (!fullAnswer.trim()) {
-        fullAnswer = "Maaf, Aczellios AI tidak memberikan respon.";
         try {
             const parsedError = JSON.parse(streamData);
-            if (parsedError.error || parsedError.message) {
-                fullAnswer += `\n*Pesan dari Server: ${parsedError.error || parsedError.message}*`;
-            }
-        } catch (e) {}
+            fullAnswer = `Gagal merespon dari API:\n\`\`\`json\n${JSON.stringify(parsedError, null, 2)}\n\`\`\``;
+        } catch (e) {
+            fullAnswer = `Gagal merespon. Mentahan dari server:\n\`\`\`\n${streamData.slice(0, 1500)}\n\`\`\``;
+        }
     }
 
     if (fullAnswer.length > 2000) {
@@ -167,17 +137,11 @@ async function handleChat(message, text, attachments) {
 
 async function handleImageGeneration(message, text, attachments) {
     const formData = new FormData();
-    const channelId = message.channel.id;
-    
     let prompt = text.replace(/^\/imagine|buatkan gambar|gambar/i, '').trim();
     if (!prompt) prompt = "A futuristic AI core shining with blue light";
 
     formData.append("prompt", prompt);
     formData.append("model", "flux-pro");
-
-    if (activeConversations.has(channelId)) {
-        formData.append("conversationId", activeConversations.get(channelId));
-    }
 
     if (attachments.size > 0) {
         let count = 0;
@@ -195,17 +159,12 @@ async function handleImageGeneration(message, text, attachments) {
         body: formData
     });
 
-    if (!res.ok) throw new Error(`API Error Status: ${res.status}`);
-
     const data = await res.text();
     let imageUrl = data;
 
     try {
         const parsed = JSON.parse(data);
         imageUrl = parsed.url || parsed.imageUrl || parsed.image || parsed.data?.[0]?.url || data;
-        if (parsed.conversationId) {
-            activeConversations.set(channelId, parsed.conversationId);
-        }
     } catch (e) { }
 
     if (imageUrl.startsWith('http')) {
@@ -214,8 +173,7 @@ async function handleImageGeneration(message, text, attachments) {
             files: [imageUrl] 
         });
     } else {
-        await message.reply("Gambar berhasil dibuat, namun format balasan dari server tidak dapat dibaca langsung oleh Discord.");
-        console.log("Raw Image Response:", imageUrl);
+        await message.reply(`Gagal generate gambar. Respon server: \`\`\`\n${data.slice(0, 1500)}\n\`\`\``);
     }
 }
 
