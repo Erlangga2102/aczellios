@@ -1,13 +1,14 @@
 const { Client, GatewayIntentBits, Partials } = require('discord.js');
 const http = require('http');
 
-// Membaca konfigurasi dari Environment Variables Railway
+// Membaca & membersihkan Environment Variables dari Railway
 const TOKEN = process.env.DISCORD_TOKEN;
 const TARGET_CHANNEL_ID = process.env.TARGET_CHANNEL_ID;
-const API_BASE = process.env.API_BASE || "https://arnaru-ai.vercel.app";
+const rawApiBase = process.env.API_BASE || "https://arnaru-ai.vercel.app";
+const API_BASE = rawApiBase.replace(/\[|\]|\(|\)/g, '').trim();
 
-// Membuat dummy HTTP Server untuk Railway Healthcheck
-const PORT = process.env.PORT || 3000;
+// Dummy HTTP Server agar Railway Health Check tidak crash
+const PORT = process.env.PORT || 8080;
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('Aczellios AI Bot is active!');
@@ -15,7 +16,7 @@ http.createServer((req, res) => {
     console.log(`[!] HTTP Server berjalan di port ${PORT}`);
 });
 
-// Penyimpanan Conversation ID untuk riwayat topik percakapan
+// Storage memori percakapan (conversationId per channel)
 const activeConversations = new Map();
 
 const client = new Client({
@@ -27,7 +28,8 @@ const client = new Client({
     partials: [Partials.Message, Partials.Channel]
 });
 
-client.on('ready', () => {
+// Menggunakan clientReady untuk menghindari warning discord.js v15
+client.once('clientReady', () => {
     console.log(`[!] Berhasil login sebagai ${client.user.tag} (Aczellios AI)`);
 });
 
@@ -38,6 +40,7 @@ client.on('messageCreate', async (message) => {
     const text = message.content.trim();
     const attachments = message.attachments;
 
+    // Command reset ingatan topik
     if (text.toLowerCase() === '/reset' || text.toLowerCase() === 'reset') {
         activeConversations.delete(message.channel.id);
         return message.reply("🧹 **Memori percakapan telah direset!** Aczellios AI siap memulai topik baru.");
@@ -62,19 +65,21 @@ client.on('messageCreate', async (message) => {
 });
 
 async function handleChat(message, text, attachments) {
-    const formData = new FormData();
-    const question = text || "Tolong jelaskan gambar/file ini dengan detail.";
+    const question = text || "Halo";
     const channelId = message.channel.id;
-    
-    formData.append("question", question);
-    formData.append("model", "gpt-5");
-    formData.append("systemPrompt", "Nama kamu adalah Aczellios AI. Kamu WAJIB menjawab seluruh pertanyaan menggunakan Bahasa Indonesia yang ramah, sopan, dan santai.");
+    let res;
 
-    if (activeConversations.has(channelId)) {
-        formData.append("conversationId", activeConversations.get(channelId));
-    }
-
+    // Memilih format payload: FormData (jika ada file) atau JSON (jika teks biasa)
     if (attachments.size > 0) {
+        const formData = new FormData();
+        formData.append("question", question);
+        formData.append("model", "gpt-5");
+        formData.append("systemPrompt", "Nama kamu adalah Aczellios AI. Kamu WAJIB menjawab seluruh pertanyaan menggunakan Bahasa Indonesia yang ramah, sopan, dan santai.");
+        
+        if (activeConversations.has(channelId)) {
+            formData.append("conversationId", activeConversations.get(channelId));
+        }
+
         let count = 0;
         for (const [id, attachment] of attachments) {
             if (count >= 9) break; 
@@ -83,20 +88,41 @@ async function handleChat(message, text, attachments) {
             formData.append("files", blob, attachment.name);
             count++;
         }
-    }
 
-    const res = await fetch(`${API_BASE}/api/chat`, {
-        method: 'POST',
-        body: formData
-    });
+        res = await fetch(`${API_BASE}/api/chat`, {
+            method: 'POST',
+            body: formData
+        });
+    } else {
+        const jsonBody = {
+            question: question,
+            model: "gpt-5",
+            systemPrompt: "Nama kamu adalah Aczellios AI. Kamu WAJIB menjawab seluruh pertanyaan menggunakan Bahasa Indonesia yang ramah, sopan, dan santai."
+        };
+        
+        if (activeConversations.has(channelId)) {
+            jsonBody.conversationId = activeConversations.get(channelId);
+        }
+
+        res = await fetch(`${API_BASE}/api/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(jsonBody)
+        });
+    }
 
     if (!res.ok) throw new Error(`API Error Status: ${res.status}`);
 
     const streamData = await res.text();
+    console.log("---- RAW RESPONSE DARI API ----");
+    console.log(streamData);
+    console.log("-------------------------------");
+
     const lines = streamData.split('\n');
     let fullAnswer = "";
     let newConversationId = null;
 
+    // Parse format SSE (Server-Sent Events)
     for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed.startsWith('data:')) continue;
@@ -121,6 +147,12 @@ async function handleChat(message, text, attachments) {
 
     if (!fullAnswer.trim()) {
         fullAnswer = "Maaf, Aczellios AI tidak memberikan respon.";
+        try {
+            const parsedError = JSON.parse(streamData);
+            if (parsedError.error || parsedError.message) {
+                fullAnswer += `\n*Pesan dari Server: ${parsedError.error || parsedError.message}*`;
+            }
+        } catch (e) {}
     }
 
     if (fullAnswer.length > 2000) {
